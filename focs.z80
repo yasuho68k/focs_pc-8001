@@ -1,0 +1,1883 @@
+;
+;	FOCS (Fortran Compile System)
+;
+
+include "focs.inc"
+
+;
+; === compiler
+;
+
+	org	$b400
+
+	JP	INIT
+	nop
+
+#if CFG_ENABLE_DEBUG != 0
+;;
+;; === DEBUG
+;;
+
+DEBUG:
+	ld	($E016), hl
+	ld	($E018), ix
+	ld	($E01A), iy
+	push	af
+	pop	hl
+	ld	($E010), hl
+	ld	($E012), bc
+	ld	($E014), de
+	jp	BASIC_GO_MON
+#endif
+
+;; ===
+
+	;	initialize
+INIT:
+	ld	ix, BASIC_TEXT_START
+	ld	iy, OBJECT_START
+
+	;	initialize work area
+
+	ld	de, WORK_TOP
+	ld	hl, DATA_TOP
+	ld	bc, DATA_SIZE
+	ldir
+
+	ld	(VAR_TOP), bc			; assume hc==0
+	ld	hl, RT_INT_RUN			; initialize runtime
+	call	OJCALL
+
+	call	RT_PRINT
+	db	$0a,$e9,$e9,$e9			; $e9==heart
+	db	" FOCS Ver 1.0 "
+	db	$e9,$e9,$e9,$0d,$0a,$0a,0
+
+	;	main loop
+MAIN:
+	ld	l, (ix+0)
+	ld	h, (ix+1)
+	push	hl				; push next line
+	ld	a, h
+	or	l
+	jp	z, BASIC_OUT_DATA		; no END statement
+	ld	l, (ix+2)
+	ld	h, (ix+3)
+	ld	(BASIC_CUR_LINE), hl
+
+	;	check comment
+
+	ld	a, (ix+4)
+	cp	':'
+.err
+	jp	nz, BASIC_SYN_ERR
+	ld	a, (ix+5)
+	cp	$8f
+	jr	nz, .err
+	ld	a, (ix+6)
+	cp	$e4
+	jr	nz, .err
+
+	push	ix
+	pop	hl
+	ld	de, $0007
+	add	hl, de
+	push	hl
+	pop	ix
+
+	call	ALLWRT
+	call	RT_CRLF
+
+	ld	a, (ix+0)
+	cp	' '
+	jr	z, .compil
+.coment
+	pop	ix				; ix=next line
+	jr	MAIN
+.compil
+	call	LINNUM
+.state
+	call	RESERV
+	ld	hl, .stend			; push statement return addr
+	push	hl
+	jp	z, ST_LET
+	cp	$16				; # of statements
+	jp	nc, BASIC_SYN_ERR
+	ld	hl, STAD
+	ld	c, a
+	call	ADDR
+	push	hl				; jump (hl)
+	ret
+
+.stend						; end statement
+	;	check out of memory
+
+	push	iy
+	pop	hl
+	ld	de, OBJECT_END
+	call	BASIC_CMP_HLDE
+.memovr
+	jp	nc, BASIC_MEM_ERR
+	ld	de, (VARAD)
+	call	BASIC_CMP_HLDE
+	jr	nc, .memovr
+
+	call	SPCSKP
+	jr	z, .coment
+#if CFG_ENABLE_MULTI_STATE == 0
+	jp	BASIC_SYN_ERR
+#else
+	;	multi statement support
+	inc	ix
+	cmp	':'
+	jr	z, .state
+	jp	BASIC_SYN_ERR
+#endif
+
+	;	END statement
+ST_END:
+	ld	a, (LSCNT)
+	and	a
+	jp	nz, BASIC_UNDEF_ERR
+	call	RT_PRINT
+	db	$0a, "VAR.AD:", 0
+	ld	hl, (VARAD)
+	call	RT_PRHEX4
+	call	RT_PRINT
+	db	"-EA00", $0d, $0a
+	db	"OBJECT:C000-", 0
+	push	iy
+	pop	hl
+	call	RT_PRHEX4
+	ld	a, $0a
+	rst	$18
+	jp	BASIC_WARM_START
+
+ALLWRT:
+	push	ix
+	pop	hl
+.wrt
+	ld	a, (hl)
+	and	a
+	ret	z
+	inc	hl
+	rst	$18
+	jr	.wrt
+
+LINNUM:
+	call	NUMBER
+	jr	c, .linsrc
+	call	DECMAL
+	ld	a, (LNCNT)
+	cp	$c0				; max line#s are 192
+.err22
+	jp	nc, BASIC_LIN_OVR
+	ex	de, hl				; de=line number
+	ld	hl, LNTOP
+.dbl
+	ld	(LNPC), hl			; save line table ptr
+	and	a
+	jr	z, .makln			; new line
+	call	RT_LD_HLHL
+	call	BASIC_CMP_HLDE
+	jr	z, .err22			; duplicate
+	ld	hl, (LNPC)			; restore line table ptr
+	inc	hl				; next entry
+	inc	hl
+	inc	hl
+	inc	hl
+	dec	a				; decrement table count
+	jr	.dbl
+
+.makln
+	ld	hl, LNCNT
+	inc	(hl)
+	ld	hl, (LNPTR)
+	call	RT_ST_DEHL			; line number
+	push	iy
+	pop	de
+	call	RT_ST_DEHL			; object ptr
+	ld	(LNPTR), hl
+
+.linsrc
+	ld	hl, LSTOP
+	ld	a, (LSCNT)
+.loop2
+	ld	(LSPC), hl
+.loop1
+	ld	(LSCC), a
+	and	a
+	ret	z
+	ld	hl, LNTOP
+	ld	a, (LNCNT)
+.loop3
+	ld	(LNPC), hl
+	ld	(LNCC), a
+	and	a
+	jr	nz, .seach
+	ld	hl, (LSPC)
+	inc	hl
+	inc	hl
+	ld	a, (LSCC)
+	dec	a
+	jr	.loop2
+.seach
+	ld	hl, (LSPC)
+	call	RT_LD_HLHL
+	push	hl
+	call	RT_LD_HLHL
+	ex	de, hl
+	ld	hl, (LNPC)
+	call	RT_LD_HLHL
+	call	BASIC_CMP_HLDE
+	jr	z, .match
+	pop	hl
+	ld	hl, (LNPC)
+	inc	hl
+	inc	hl
+	inc	hl
+	inc	hl
+	ld	a, (LNCC)
+	dec	a
+	jr	.loop3
+.match
+	ld	hl, (LNPC)
+	inc	hl
+	inc	hl
+	call	RT_LD_HLHL
+	ex	de, hl
+	pop	hl
+	call	RT_ST_DEHL
+	ld	hl, LSCNT
+	dec	(hl)
+	ld	hl, (LSPC)
+	ld	d, h
+	ld	e, l
+	inc	hl
+	inc	hl
+	ld	b, $0
+	ld	a, (LSCC)
+	dec	a
+	add	a, a
+	ld	c, a
+	jr	z, .skip
+	ldir
+.skip
+	ld	hl, (LSPTR)
+	dec	hl
+	dec	hl
+	ld	(LSPTR), hl
+	srl	a
+	jr	.loop1
+
+SEARCH:
+	push	ix
+	pop	de
+.rpt1
+	push	de
+	pop	ix
+.rpt2
+	call	SPCSKP
+	ld	b, a
+	ld	a, (hl)
+	and	a
+	ret	z				; not found
+	inc	ix
+	push	af
+	and	$7f
+	cp	b
+	jr	nz, .next
+	pop	af
+	inc	hl
+;;	jp	p, .rpt2			; BUGBUG?
+;; FIX CODE
+	cp	$80				; end char?
+	jr	c, .rpt2			; no. next
+	;	NOTE: must be Z=0 at this point
+;;
+	ret					; found
+.next
+	pop	af
+.next1
+	ld	a, (hl)
+	inc	hl
+	cp	$80
+	jr	c, .next1
+	inc	c
+	jr	.rpt1
+
+RESERV:
+	push	bc
+	push	de
+	push	hl
+	ld	c, 1
+	ld	hl, RSVAD
+	call	SEARCH
+	jr	z, .noop
+	ld	a, c
+	and	a
+.noop
+	pop	hl
+	pop	de
+	pop	bc
+	ret
+
+VARSRC:
+	ld	hl, (ARYNAM)
+	ld	c, 1
+	call	SEARCH
+	jr	nz, .aryadr
+	ld	hl, (VARNAM)
+	ld	c, 1
+	push	ix
+	call	ASCSRC
+	exx
+	pop	de
+	push	ix
+	pop	hl
+	call	BASIC_CMP_HLDE
+	exx
+	push	bc
+	call	z, MAKVAR
+	pop	bc
+
+	ld	l, c
+	ld	h, 0
+	add	hl, hl
+	ex	de, hl
+	ld	hl, (VAROBJ)
+	and	a
+	sbc	hl, de
+	ld	de, (VARAD)
+	call	BASIC_CMP_HLDE
+	jr	nc, .sng
+	ld	(VARAD), hl
+.sng
+	ld	d, $ff
+	ret
+
+.aryadr
+	ld	h, 0
+	dec	c
+	ld	l, c
+	add	hl, hl
+	add	hl, hl
+	ex	de, hl
+	ld	hl, ARRAY_TABLE			; array table (fixed addr)
+	add	hl, de
+	ld	c, (hl)
+	inc	hl
+	ld	b, (hl)
+	inc	hl
+	ld	e, (hl)
+	inc	hl
+	ld	d, (hl)
+	ld	h, b
+	ld	l, c
+	ret
+
+SPCSKP:
+	dec	ix
+.spskp
+	inc	ix
+	ld	a, (ix+0)
+	cp	' '
+	jr	z, .spskp
+	call	BASIC_TOUPPER
+	and	a
+	ret
+
+ALPNUM:
+	call	SPCSKP
+	call	BASIC_ISALPHA
+	ret	nc
+NUMBER:
+	call	SPCSKP
+	cp	'0'
+	ret	c
+	cp	':'
+	ccf
+	ret
+
+MAKVAR:
+	ld	b, 1
+	jr	make1
+MAKARY:
+	ld	b, '('
+make1:
+	call	RESERV
+	jp	nz, BASIC_SYN_ERR
+	call	SPCSKP
+	call	BASIC_ISALPHA
+	jp	c, BASIC_SYN_ERR
+.make2
+	call	MAKE
+	call	RESERV
+	jp	nz, BASIC_SYN_ERR
+	call	ALPNUM
+	jr	nc, .make2
+.makend
+	cp	b
+	jr	z, namary
+	dec	hl
+	set	7, (hl)
+endmak:
+	inc	hl
+	ld	(hl), 0
+	jr	limit
+namary:
+	ld	(hl), ('(' + $80)
+	inc	hl
+	ld	(hl), 0
+	inc	hl
+	ld	(VARNAM), hl
+	ld	(hl), 0
+limit:
+	ld	de, NAMMAX
+	call	BASIC_CMP_HLDE
+	jp	nc, BASIC_ARY_OVR
+	ret
+
+MAKE:
+	ld	(hl), a
+	inc	ix
+	jr	endmak
+
+ASCSRC:
+	push	ix
+	pop	de
+.repeat
+	call	SEARCH
+	jr	nz, .more
+	push	de
+	pop	ix
+	ret
+.more
+	call	ALPNUM
+	ret	c
+	push	de
+	pop	ix
+	inc	c
+	jr	.repeat
+
+	; open bracket
+COPEN:
+	call	SPCSKP
+	cp	'('
+	jr	check
+
+	; close bracket
+CCLOSE:
+	call	SPCSKP
+	cp	')'
+check:
+	jp	nz, BASIC_SYN_ERR
+	inc	ix
+	ret
+
+CONMA:
+	call	SPCSKP
+	cp	','
+	jr	check
+
+HEXDEC:
+	ld	hl, 0
+.hex
+	call	SPCSKP
+	call	BASIC_CHK_HEX
+	ret	c
+	call	BASIC_HEX2BIN
+	inc	ix
+	jr	.hex
+
+CONST:
+	call	SPCSKP
+	cp	'$'
+	jr	nz, .dec
+	inc	ix
+	call	SPCSKP
+	call	BASIC_CHK_HEX
+	jp	c, BASIC_SYN_ERR
+	jr	HEXDEC
+.dec
+	call	NUMBER
+	jp	c, BASIC_SYN_ERR
+
+DECMAL:
+	push	de
+	ld	hl, 0
+.decloop
+	call	NUMBER
+	jr	nc, .plus
+	pop	de
+	ret
+.plus
+	sub	'0'
+	add	hl, hl				; hl=hl*10
+	ld	d, h
+	ld	e, l
+	add	hl, hl
+	add	hl, hl
+	add	hl, de
+	ld	d, 0
+	ld	e, a
+	add	hl, de
+	ld	a, h
+	and	a
+	jp	m, BASIC_INT_OVR
+	inc	ix
+	jr	.decloop
+
+ST_DIM:
+	ld	hl, (VARNAM)
+	ld	a, (hl)
+	and	a
+	jp	nz, BASIC_ARY_REDEF
+.dim_mk
+	ld	hl, (ARYNAM)
+	ld	c, 1
+	call	SEARCH
+	jp	nz, BASIC_ARY_REDEF
+	ld	a, c
+	cp	$40				; max arrays
+	jp	nc, BASIC_MEM_ERR
+
+	call	MAKARY
+	call	COPEN
+	call	CONST
+	ld	a, h
+	cp	$35				; max size of array: $3500
+	jp	nc, BASIC_MEM_ERR
+	call	CCLOSE
+
+	push	hl
+	add	hl, hl
+	inc	hl
+	inc	hl
+	ex	de, hl
+	ld	hl, (VAROBJ)
+	and	a				; clear carry
+	sbc	hl, de
+	ld	(VAROBJ), hl
+	ld	(VARAD), hl
+	ex	de, hl
+	ld	hl, (ARYPTR)
+	call	RT_ST_DEHL
+	pop	de
+	call	RT_ST_DEHL
+	ld	(ARYPTR), hl
+	call	SPCSKP
+	cp	','
+	ret	nz
+	inc	ix
+	jr	.dim_mk
+
+	;	expression
+EXPRSN:
+	call	MUL
+ADDSUB:
+	call	SPCSKP
+	cp	'+'
+	jr	z, .adsb
+	cp	'-'
+	ret	nz
+.adsb
+	inc	ix
+	push	af
+	call	OJPUSH
+	call	MUL
+	pop	af
+	ld	hl, $19d1			; pop de / add hl,de
+	cp	'+'
+	jr	nz, .sub
+	call	OBJHL
+	jr	.as
+.sub
+	ld	hl, RT_SUB
+	call	OJCALL
+.as
+	jr	ADDSUB
+
+MUL:
+	call	PAR
+MULDIV:
+	call	SPCSKP
+	cp	'*'
+	jr	z, .mldv
+	cp	'/'
+	ret	nz
+.mldv
+	inc	ix
+	push	af
+	call	OJPUSH
+	call	PAR
+	pop	af
+	ld	hl, RT_DIV
+	cp	'*'
+	jr	nz, .objmd
+	ld	hl, RT_MUL
+.objmd
+	call	OJCALL
+	jr	MULDIV
+
+PAR:
+	call	SPCSKP
+	cp	'('
+	jr	nz, .term
+	inc	ix
+	call	EXPRSN
+	call	CCLOSE
+.term
+	cp	'-'
+	jr	nz, .inv
+
+	inc	ix
+	call	PAR
+	ld	a, (iy-3)
+	cp	$21				; ld hl, ####
+	jr	z, .cinv
+	ld	hl, RT_INVRS
+	jp	OJCALL
+.cinv
+	dec	iy
+	dec	iy
+	call	RT_INVRS
+	jp	OBJHL
+.inv
+	cp	'+'
+	jr	nz, .pls
+	inc	ix
+	jr	PAR
+.pls
+	call	RESERV
+	jr	z, .fnc
+	cp	$14				; built in function?
+	jp	c, BASIC_SYN_ERR
+	jr	FUNC
+.fnc
+	call	SPCSKP
+	call	BASIC_ISALPHA
+	jr	nc, VAR
+	call	CONST
+
+CSTSET:
+	ld	a, $21				; ld hl, ####
+	jp	OBJA
+
+SKIPEQ:
+	call	SPCSKP
+	jp	z, BASIC_SYN_ERR
+	cp	'='
+	inc	ix
+	jr	nz, SKIPEQ
+	jp	EXPRSN
+
+CHKEQ:
+	call	SPCSKP
+	cp	'='
+	jp	nz, BASIC_SYN_ERR
+	pop	ix
+	ret
+
+VAR:
+	call	VARSRC
+	ld	a, d
+	and	a
+	jp	p, .aryvar
+.sngvar
+	ld	a, $2a				; ld hl,(####)
+	jp	OBJA
+.aryvar
+	push	hl
+	push	de
+	call	EXPRSN
+	call	CCLOSE
+	pop	hl
+	ld	a, $11				; ld de, limit
+	call	OBJA
+	pop	hl
+	ld	a, $01				; ld bc, vartop
+	call	OBJA
+
+	ld	hl, RT_ARYLD
+	jp	OJCALL
+
+FUNC:
+	sub	$14				; index from functions
+	ld	h, 0
+	ld	l, a
+	add	hl, hl
+	ex	de, hl
+	ld	hl, ST_FUNCAD			; func runtime table
+	add	hl, de
+	call	RT_LD_HLHL
+	and	a
+	jr	nz, .fnc			; not a mem()
+	call	SPCSKP
+	cp	'#'				; load word
+	jr	nz, .memb
+	inc	ix
+.memb
+	push	af
+	xor	a
+	call	FNCEXP
+	pop	af
+	jr	z, .memw
+	ld	a, $6e				; ld l,(hl)
+	ld	hl, $0026			; ld h, 0
+	jr	.memend
+.memw
+	ld	h, $5e				; ld e,(hl)
+	call	OBJH
+	ld	a, $23				; inc hl
+	ld	hl, $6b66			; ld h, (hl) / ld l, e
+.memend
+	jp	OBJA
+.fnc
+	cp	5				; two parameters function?
+	ld	a, 0
+	jr	c, .prm1
+	inc	a
+.prm1
+	call	FNCEXP
+	jp	OJCALL
+
+FNCEXP:
+	push	hl
+	push	af
+	call	COPEN
+	pop	af
+.fnloop
+	push	af
+	call	EXPRSN
+	pop	af
+	and	a
+	jr	z, .czero
+	push	af
+	call	CONMA
+	pop	af
+	call	OJPUSH
+	dec	a
+	jr	.fnloop
+.czero
+	call	CCLOSE
+	pop	hl
+	ret
+
+	; 	LET statment
+ST_LET:
+	push	ix
+	call	SKIPEQ
+	ex	(sp), ix
+	call	STORE
+	jp	CHKEQ
+
+STORE:
+	call	VARSRC
+	ld	a, d
+	and	a
+	jp	p, .aryvar
+.sngvar
+	ld	a, $22				; ld (####), hl
+	jp	OBJA
+.aryvar
+	push	hl
+	push	de
+	call	OJPUSH
+	call	EXPRSN
+	call	CCLOSE
+	pop	hl
+	ld	a, $11				; ld de,limit
+	call	OBJA
+	pop	hl
+	ld	a, $01				; ld bc,arytop
+	call	OBJA
+	ld	hl, RT_ARYST
+	jp	OJCALL
+
+ST_MEMLET:
+	push	ix
+	call	SKIPEQ
+	ex	(sp), ix
+	call	OJPUSH
+	call	SPCSKP
+	cp	'#'				; store word
+	jr	nz, .memb
+	inc	ix
+.memb
+	push	af
+	xor	a
+	call	FNCEXP
+	pop	af
+	ld	hl, $73d1			; pop de / ld (hl), e
+	call	OBJHL
+	jr	nz, .mlend			; word?
+	ld	hl, $7223			; inc hl / ld (hl), d
+	call	OBJHL
+.mlend
+	jp	CHKEQ
+
+ST_PORT:
+	push	ix
+	call	SKIPEQ
+	ex	(sp), ix
+	call	OJPUSH
+	xor	a
+	call	FNCEXP
+	ld	hl, RT_OUT
+	call	OJCALL
+	jp	CHKEQ
+
+	;	/"XHV - write operations
+SQXHV:
+	ld	hl, CMSRC
+	ld	c, 1
+	call	SEARCH
+	jp	z, BASIC_SYN_ERR
+	ld	hl, CMADR			; sqxhv handler
+	call	ADDR
+	push	hl
+	ld	hl, CMRUN			; sqxhv runtime
+	jp	ADDR
+
+SQXHV_SLASH:
+	jp	OJCALL
+
+SQXHV_QUOTE:
+	call	OJCALL
+.loop
+	ld	a, (ix+0)
+	and	a
+	jp	z, BASIC_SYN_ERR
+	inc	ix
+	cp	'\"'
+	jr	nz, .nop
+	xor	a
+.nop
+	ld	h, a
+	call	OBJH
+	jr	nz, .loop
+	ret
+
+SQXHV_XHV:
+	call	COLON
+	jp	OJCALL
+
+COLON:
+	push	hl
+	call	CPCLN
+	inc	ix
+	jp	nz, BASIC_SYN_ERR
+	call	EXPRSN
+	pop	hl
+	ret
+
+ST_WRITE:
+	call	COPEN
+.wrt
+	ld	hl, WSRC			; write cmd(DIBA) addr
+	ld	c, 1
+	call	SEARCH
+	ld	hl, .wrt			; next write cmd
+	push	hl
+	ld	hl, ST_RETAD
+	push	hl
+	jp	z, SQXHV
+	ld	hl, WADR			; write cmd handler
+	call	ADDR
+	push	hl
+	ld	hl, WRUN			; write cmd runtime addrs
+	jp	ADDR				; call handler
+
+ST_RETAD:					; it shared w/ read statement
+	call	SPCSKP
+	inc	ix
+	cp	')'
+	jr	nz, .cma
+	pop	hl				; exit write loop
+	ret
+.cma
+	cp	','
+	ret	z				; next command
+	dec	ix				; restore command
+	ret
+
+ST_WRTI:
+	push	hl
+	call	NUMBER
+	ld	h, 0
+	jr	c, .left
+	call	CONST				; no error check
+	call	HOVR				; h !=0: error
+	ld	h, l
+.left
+	ld	l, $06				; ld b, ##
+.loop
+	call	COLON
+	call	OBJHL
+	ex	de, hl
+	pop	hl
+	push	hl
+	call	OJCALL
+	ex	de, hl
+	call	CPCLN
+	jr	z, .loop
+	pop	hl
+	ret
+
+ST_WRTB:
+	call	SPCSKP
+	cp	'2'
+	jr	nz, ST_WRTD
+	ld	de, 4				; diff between B and B2
+	add	hl, de
+	inc	ix
+
+ST_WRTD:
+	call	COLON
+	call	OJCALL
+	call	CPCLN
+	jr	z, ST_WRTD
+	ret
+
+ST_WRTA:
+	call	COLON
+	ld	hl, $df7d			; ld a,l / rst $18
+	call	OBJHL
+	call	CPCLN
+	jr	z, ST_WRTA
+	ret
+
+ST_READ:
+	call	COPEN
+ST_READR:
+	ld	hl, RSRC			; RSRC = WSRC + 1
+	ld	c, 1
+	call	SEARCH
+	ld	hl, ST_READR			; ret addr = READR
+	push	hl
+	ld	hl, ST_RETAD			; shared w/ write
+	push	hl
+	jp	z, SQXHV
+	ld	hl, RADR			; read ops addr
+	call	ADDR
+	push	hl
+	ld	hl, RRUN			; read runtime addr
+	jp	ADDR
+
+ST_READIBA:
+	call	OJCALL
+	call	CPCLN
+	jp	nz, BASIC_SYN_ERR
+	inc	ix
+	jp	STORE
+
+	;	special function calls (e.g. CONSOLE)
+ST_SPCFNC:
+
+	;	two parameters
+ST_SFP2:
+	ld	b, 1				; b : number of params - 1
+	db	$11				; ld de, #### : it is just to
+						; invalidate the next 'ld b'
+
+	;	three parameters
+ST_SFP3:
+	ld	b, 2
+	db	$11				; ld de, #### : same as above
+
+	;	four parameters
+ST_SFP4:
+	ld	b, 3
+	db	$11				; ld de, #### : same as above
+
+	;	five parameters
+ST_SFP5:
+	ld	b, 4
+
+	sub	$0d				; 1 from special funcs
+	ld	c, a
+	ld	hl, FNSTAD			; funcs runtime addr
+	call	ADDR
+	ld	a, b
+	call	FNCEXP
+	jp	OJCALL
+
+ST_DO:
+	call	ST_LET
+	ld	a, (iY-3)
+	cp	$22				; store to variable?
+	jp	nz, BASIC_MIS_MATCH
+	ld	hl, RT_VARSET			; DO - start
+	call	OJCALL
+	call	CONMA
+	call	EXPRSN
+	ld	hl, RT_UTLSET			; DO - end
+	call	OJCALL
+	call	SPCSKP
+	jr	nz, .step
+	ld	hl, 1
+	call	CSTSET
+	jr	.stpset
+.step
+	call	CONMA
+	call	EXPRSN
+.stpset
+	ld	hl, RT_STPSET
+	jp	OJCALL
+
+ST_CONT:
+	ld	hl, 1
+	call	SPCSKP
+	call	nz, DECMAL
+	call	HOVR
+	ld	a, l
+	and	a
+	jp	z, BASIC_NOT_CONT
+	ld	b, l
+.nest
+	ld	hl, RT_CONT
+	call	OJCALL
+	djnz	.nest
+	ret
+
+CPCLN:
+	call	SPCSKP
+	cp	':'
+	ret
+
+HOVR:
+	ld	a, h
+	and	a
+	jp	nz, BASIC_ILL_FNC
+	ret
+
+MAKLS:
+	push	af
+	ld	a, (LSCNT)
+	cp	$80
+	jp	nc, BASIC_LIN_OVR
+	inc	a
+	ld	(LSCNT), a
+	call	DECMAL
+	pop	af
+	call	OBJA
+	push	iy
+	pop	de
+	dec	de
+	dec	de
+	ld	hl, (LSPTR)
+	call	RT_ST_DEHL
+	ld	(LSPTR), hl
+	ret
+
+ST_IF:
+	xor	a
+	call	FNCEXP
+	ld	hl, RT_FLGSET
+	call	OJCALL
+
+	call	NUMBER
+	ld	a, $FA				; jp m, #1
+	call	nc, MAKLS
+	call	CONMA
+
+	call	NUMBER
+	ld	a, $CA				; jp z, #2
+	call	nc, MAKLS
+	call	CONMA
+
+	call	NUMBER
+	ld	a, $DA				; jp c, #3
+	call	nc, MAKLS
+	ret
+
+ST_GOTO:
+	ld	a, $C3				; jp #
+	jp	MAKLS
+
+ST_CALL:
+	ld	a, $CD				; call #
+	jp	MAKLS
+
+ST_RETURN:
+	ld	h, $C9				; ret
+	jp	OBJH
+
+ST_STOP:
+	ld	b, $C3				; jp stop
+	ld	de, RT_STOP
+	jr	ST_STPNPSE
+
+ST_PAUSE:
+	ld	b, $CD				; call pause
+	ld	de, RT_PAUSE
+
+ST_STPNPSE:
+	ld	h, $FF
+	call	NUMBER
+	call	nc, DECMAL			; no check
+	call	CSTSET
+	ex	de, hl
+	ld	a, b
+	jp	OBJA
+
+ST_BREAK:
+	ld	hl, RT_BREAK
+	jp	OJCALL
+
+OJPUSH:
+	ld	(iy+0), $e5			; push hl
+	inc	iy
+	ret
+
+OJCALL:
+	ld	a, $cd				; call
+OBJA:
+	ld	(iy+0), a
+	inc	iy
+OBJHL:
+	ld	(iy+0), l
+	inc	iy
+OBJH:
+	ld	(iy+0), h
+	inc	iy
+	ret
+
+ADDR:
+	push	de
+	ex	de, hl
+	ld	h, 0
+	ld	l, c
+	dec	l
+	add	hl, hl
+	add	hl, de
+	call	RT_LD_HLHL
+	pop	de
+	ret
+
+;
+; === constant definitions
+;
+
+DATA_TOP:
+	dw	VAR_TOP				; ARYNAM
+	dw	VAR_TOP + 1			; VARNAM
+	dw	ARYBUF				; ARYPTR
+	dw	VARBUF				; VAROBJ
+	dw	VARBUF				; VARAD
+	db	0				; LSCNT
+	db	0				; LNCNT
+	dw	LSTOP				; LSPTR
+	dw	LNTOP				; LNPTR
+
+STAD:
+	; instruction name table
+	dw	ST_WRITE			; 01
+	dw	ST_READ				; 02
+	dw	ST_DO				; 03
+	dw	ST_CONT				; 04
+	dw	ST_IF				; 05
+	dw	ST_GOTO				; 06
+	dw	ST_CALL				; 07
+	dw	ST_RETURN			; 08
+	dw	ST_PAUSE			; 09
+	dw	ST_BREAK			; 0A
+	dw	ST_STOP				; 0B
+	dw	ST_DIM				; 0C
+	dw	ST_END				; 0D
+
+	dw	ST_SFP4				; 0E : CONSOLE
+	dw	ST_SFP3				; 0F : COLOR
+	dw	ST_SFP2				; 10 : WIDTH
+	dw	ST_SFP3				; 11 : PSET
+	dw	ST_SFP2				; 12 : PRESET
+	dw	ST_SFP5				; 13 : LINE
+
+	dw	ST_MEMLET			; 14
+	dw	ST_PORT				; 15
+
+	;	16-1B : functions. not a statement
+
+	;	reserved instruction names
+RSVAD:
+	db	"WRIT", ('E' + $80)		; 01
+	db	"REA", ('D' + $80)		; 02
+	db	"D", ('O' + $80)		; 03
+	db	"CONTINU", ('E' + $80)		; 04
+	db	"I", ('F' + $80)		; 05
+	db	"GOT", ('O' + $80)		; 06
+	db	"CAL", ('L' + $80)		; 07
+	db	"RETUR", ('N' + $80)		; 08
+	db	"PAUS", ('E' + $80)		; 09
+	db	"BREA", ('K' + $80)		; 0A
+	db	"STO", ('P' + $80)		; 0B
+	db	"DIMENSIO", ('N' + $80)		; 0C
+	db	"EN", ('D' + $80)		; 0D
+	;	special functions (e.g. CONSOLE
+	db	"CONSOL", ('E' + $80)		; 0E
+	db	"COLO", ('R' + $80)		; 0F
+	db	"WIDT", ('H' + $80)		; 10
+	db	"PSE", ('T' + $80)		; 11
+	db	"PRESE", ('T' + $80)		; 12
+	db	"LIN", ('E' + $80)		; 13
+	;	functions
+	db	"ME", ('M' + $80)		; 14
+	db	"POR", ('T' + $80)		; 15
+	db	"AB", ('S' + $80)		; 16
+	db	"SG", ('N' + $80)		; 17
+	db	"RN", ('D' + $80)		; 18
+	db	"MO", ('D' + $80)		; 19
+	db	"POIN", ('T' + $80)		; 1A
+	db	"US", ('R' + $80)		; 1B
+	db	0				; END mark
+
+ST_FUNCAD:
+	dw	RT_MEM
+	dw	RT_INP
+	dw	RT_ABS
+	dw	RT_SGN
+	dw	RT_RND
+	dw	RT_MOD
+	dw	RT_POINT
+	dw	RT_USR
+
+CMSRC:
+	db	('/' + $80)
+	db	('\"' + $80)
+	db	('X' + $80)
+	db	('H' + $80)
+	db	('V' + $80)
+	db	0
+
+CMADR:
+	dw	SQXHV_SLASH
+	dw	SQXHV_QUOTE
+	dw	SQXHV_XHV
+	dw	SQXHV_XHV
+	dw	SQXHV_XHV
+
+CMRUN:
+	dw	RT_SQXHV_SLASH
+	dw	RT_PRINT
+	dw	RT_SQXHV_X
+	dw	RT_SQXHV_H
+	dw	RT_SQXHV_V
+
+WSRC:
+	db	('D' + $80)
+RSRC:
+	db	('I' + $80)
+	db	('B' + $80)
+	db	('A' + $80)
+	db	0
+
+WADR:
+	dw	ST_WRTD
+	dw	ST_WRTI
+	dw	ST_WRTB
+	dw	ST_WRTA
+
+WRUN:
+	dw	BASIC_PRT_DEC
+	dw	RT_WRITE_I
+	dw	RT_PRHEX4
+	dw	BASIC_PRINT
+
+RADR:
+	dw	ST_READIBA
+	dw	ST_READIBA
+	dw	ST_READIBA
+
+RRUN:
+	dw	RT_READ_I
+	dw	RT_READ_B
+	dw	RT_READ_A
+
+	;	runtime addr for special functions (e.g. CONSOLE)
+FNSTAD:
+	dw	RT_CONSOLE
+	dw	RT_COLOR
+	dw	RT_WIDTH
+	dw	RT_PSET
+	dw	RT_PRESET
+	dw	RT_LINE
+
+;
+; === runtime
+;
+
+	align	256
+
+RT_INT_RUN:
+	ld	iy, BASIC_WORK
+	xor	a
+	ld	(RT_DONEST), a
+	ret
+
+RT_MEM:
+	ld	l, (hl)
+	ld	h, 0
+	ret
+
+RT_ABS:
+	bit	7, h
+	ret	z
+RT_INVRS:
+	ld	a, h
+	cpl
+	ld	h, a
+	ld	a, l
+	cpl
+	ld	l, a
+	inc	hl
+	ret
+
+RT_INP:
+	ld	c, l
+	in	l, (c)
+	ld	h, 0
+	ret
+
+RT_OUT:
+	ld	c, l
+	pop	hl
+	ex	(sp), hl
+	out	(c), l
+	ret
+
+RT_SGN:
+	call	RT_FLGSET
+	ld	hl, $ffff
+	ret	m
+	inc	hl
+	ret	z
+	inc	hl
+	ret
+
+RT_SUB:
+	ex	de, hl
+	pop	hl
+	ex	(sp), hl
+	and	a
+	sbc	hl, de
+	ret
+
+RT_DIV:
+	ex	de, hl
+	pop	hl
+	ex	(sp), hl
+	ex	de, hl
+	jp	BASIC_DIV_INT
+
+RT_MUL:
+	ex	de, hl
+	pop	hl
+	ex	(sp), hl
+	call	BASIC_MUL
+	jp	BASIC_CINT
+
+RT_MOD:
+	ex	de, hl
+	pop	hl
+	ex	(sp), hl
+	ex	de, hl
+	jp	BASIC_MOD
+
+RT_RND:
+	push	de
+	ld	de, (RT_RND_SEED)
+	ld	a, d
+	add	a, l
+	ld	l, a
+	ld	a, e
+	add	a, h
+	ld	h, a
+	ld	l, d
+	ld	a, r
+	xor	d
+	rrc	a
+	rrc	a
+	ld	d, a
+	ld	a, r
+	xor	e
+	rlc	a
+	rlc	a
+	ld	e, d
+	ld	d, a
+	ld	(RT_RND_SEED), de
+	res	7, h				; to avoid overflow
+	inc	l
+	res	7, d				; to avoid overflow
+	call	RT_RND_DIV
+	ex	de, hl
+	pop	de
+	res	7, h				; must be positive
+	ret
+
+	;
+	;	hl / de: de=ans, hl=mod
+	;
+RT_RND_DIV:
+	ex	de, hl
+	ld	b, h
+	ld	c, l
+	ld	a, 10h
+	and	a				; BUGBUG: need clear CY
+.loop
+	sla	c
+	rl	b
+	adc	hl, hl
+	inc	c
+	sbc	hl, de
+	jr	nc, .next
+	add	hl, de
+	dec	c
+.next
+	dec	a
+	jr	nz, .loop
+	ex	de, hl
+	ld	h, b
+	ld	l, c
+	ret
+
+RT_POINT:
+	ex	de, hl
+	pop	hl
+	ex	(sp), hl
+	ld	h, l
+	ld	l, e
+	inc	h
+	inc	l
+	ld	(BASIC_FN_PARMS), hl
+	ld	hl, .bkt_close
+	call	BASIC_POINT
+	ld	hl, 0
+	ret	c				; point is not set
+	ret	z
+	dec	hl				; point is set
+	ret
+.bkt_close
+	db	')'
+
+RT_USR:
+	ex	de, hl
+	pop	hl
+	ex	(sp), hl
+	push	hl
+	ex	de, hl
+	ret
+
+RT_VARSET:
+	ld	hl, RT_DONEST
+	ld	a, (hl)
+	cp	NSTMAX
+	jp	nc, BASIC_MEM_ERR
+	inc	(hl)
+	ld	de, $0008
+	add	iy, de
+	pop	hl				; hl=ret addr
+	push	hl
+	dec	hl
+	dec	hl
+	dec	hl
+	dec	hl
+	dec	hl
+	call	RT_LD_HLHL			; hl=do var addr
+	ld	(iy+0), l
+	ld	(iy+1), h
+	ret
+
+RT_UTLSET:
+	ld	(iy+4), l
+	ld	(iy+5), h
+	ret
+
+RT_STPSET:
+	ld	(iy+2), l
+	ld	(iy+3), h
+	pop	hl
+	push	hl
+	ld	(iy+6), l
+	ld	(iy+7), h
+	ret
+
+	;
+	;	DO control block
+	;
+	;    +0	+---------------+ <- IY
+	;	| do var addr   |
+	;    +2	+---------------+
+	;	| step value    |
+	;    +4	+---------------+
+	;	| until value   |
+	;    +6	+---------------+
+	;	| continue addr |
+	;	+---------------+
+	;
+
+RT_CONT:
+	ld	a, (RT_DONEST)
+	and	a
+	jp	z,BASIC_NOT_CONT
+	ld	(RT_SPPUSH), sp			; save SP
+	ld	sp, iy
+	pop	de				; de=do var addr
+	ld	h, d
+	ld	l, e
+	ld	c, (hl)
+	inc	hl
+	ld	b, (hl)				; bc=do var value
+	pop	hl
+	push	hl				; hl=step value
+	add	hl, bc				; hl=do var + step
+	ex	de, hl
+	ld	(hl), e
+	inc	hl
+	ld	(hl), d				; update do var
+	pop	af				; throw step value
+	pop	hl				; hl=until value
+	pop	bc				; bc=continue addr
+	ld	sp, (RT_SPPUSH)			; restore SP
+	cp	$80
+	jr	c, .plus
+	ex	de, hl
+.plus
+	call	RT_CMP_HLDE
+	ld	h, b
+	ld	l, c				; hl=continue addr
+	jr	c, .end
+	ex	(sp), hl			; continue
+	ret
+.end
+	ld	de, $fff8
+	add	iy, de
+	ld	hl, RT_DONEST
+	dec	(hl)
+	ret
+
+RT_STOP:
+	push	hl
+	call	RT_CRLF
+	call	RT_PRINT
+	db	"STOP ", 0
+	pop	hl
+	call	RT_DECP
+	jp	BASIC_WARM_START
+
+RT_PAUSE:
+	push	hl
+	call	RT_CRLF
+	call	RT_PRINT
+	db	"PAUSE ", 0
+	pop	hl
+	call	RT_DECP
+	call	BASIC_GET_KEY
+	jp	RT_CRLF
+
+RT_DECP:
+	bit	7,h
+	ret	nz
+	call	BASIC_PRT_DEC
+	ld	a, ' '
+	rst	$18
+	ret
+
+RT_BREAK:
+	in	a, ($09)
+	and	$01				; STOP key
+	ret	nz
+	jp	BASIC_BREAK
+
+RT_OVER:
+	bit	7, h
+	jp	nz, BASIC_ARY_OVER
+	ex	de, hl
+	call	BASIC_CMP_HLDE
+	jp	c, BASIC_ARY_OVER
+	ex	de, hl
+	add	hl, hl
+	add	hl, bc
+	ret
+
+RT_ARYLD:
+	call	RT_OVER
+	jp	RT_LD_HLHL
+
+RT_ARYST:
+	call	RT_OVER
+	ex	de, hl
+	pop	hl
+	ex	(sp), hl
+	ex	de, hl
+	jp	RT_ST_DEHL
+
+RT_PRINT:
+	pop	hl
+	call	BASIC_PRINT
+	push	bc
+	ret
+
+RT_FLGSET:
+	push	de
+	ld	de, $0
+	call	BASIC_CMP_HLDE
+	pop	de
+	ret	m
+	ret	z
+	scf
+	ret
+
+RT_LD_HLHL:
+	push	de
+	ld	e, (hl)
+	inc	hl
+	ld	d, (hl)
+	ex	de, hl
+	pop	de
+	ret
+
+RT_ST_DEHL:
+	ld	(hl), e
+	inc	hl
+	ld	(hl), d
+	inc	hl
+	ret
+
+	;	if hl<de then CY=1
+RT_CMP_HLDE:
+	ld	a,h
+	xor	d
+	jp	m, .nsgn
+	sbc	hl, de
+	ret
+.nsgn
+	ld	a, h
+	and	a
+	ret	p
+	scf
+	ret
+
+RT_SQXHV_SLASH:
+	jp	RT_CRLF
+
+RT_SQXHV_X:
+	ld	a, l
+	and	a
+	ret	z
+	ld	a, ' '
+	rst	$18
+	dec	l
+	jr	RT_SQXHV_X
+
+RT_SQXHV_H:
+	ld	a, l
+	inc	a
+	ld	(BASIC_CUR_HORZ), a
+	ret
+
+RT_SQXHV_V:
+	ld	a, l
+	inc	a
+	ld	(BASIC_CUR_VERT), a
+	ret
+
+RT_WRITE_I:
+	push	bc
+	call	BASIC_HL_FAC2
+	call	BASIC_FAC_ASCII
+	pop	bc
+	ld	a, b
+	and	a
+	jr	z, .norm			; no format needed
+.ssloop						; omitt heading spaces
+	ld	a, (hl)
+	cp	' '
+	jr	nz, .ssend
+	inc	hl
+	jr	.ssloop
+.ssend
+	push	hl
+	ld	c, 0				; c: string length
+.llen
+	ld	a, (hl)
+	and	a
+	jr	z, .elen
+	inc	hl
+	inc	c
+	jr	.llen
+.elen
+	pop	hl
+.form
+	ld	a, c
+	cp	b
+	jr	nc, .norm
+	ld	a, ' '
+	rst	$18
+	dec	b
+	jr	.form
+.norm
+	jp	BASIC_PRINT
+
+RT_CRLF:
+	ld	a, $0d
+	rst	$18
+	ld	a, $0a
+	rst	$18
+	ret
+
+RT_PRHEX4:
+	ld	a, h
+	call	RT_PRHEX2A
+RT_PRHEX2:
+	ld	a, l
+RT_PRHEX2A:
+	call	BASIC_BIN2HEX
+	ld	a, d
+	rst	$18
+	ld	a, e
+	rst	$18
+	ret
+
+RT_READ_I:
+	call	BASIC_LINE_INPUT
+	inc	hl
+	call	BASIC_ASC2VAL
+	ld	a, (hl)
+	and	a
+	jr	z, RT_READ_RET
+	call	BASIC_PRT_REDO
+	jr	RT_READ_I
+RT_READ_RET:
+	call	BASIC_CINT
+	ld	hl, (BASIC_FAC)
+	ret
+	nop
+
+RT_READ_B:
+	call	BASIC_LINE_INPUT
+	ld	(hl), 'H'			; add "&H"
+	dec	hl
+	ld	(hl), '&'
+	call	BASIC_ASC2VAL
+	ld	a, (hl)
+	and	a
+	jr	z, RT_READ_RET
+	call	BASIC_PRT_REDO
+	jr	RT_READ_I
+
+RT_READ_A:
+	call	BASIC_CUR_OFF
+RT_READ_A_RET:
+	ld	l, a
+	ld	h, 0
+	ret
+RT_READ_A1:
+	call	BASIC_GET_KEY
+	jr	RT_READ_A_RET:
+
+RT_CONSOLE:
+	pop	ix				; ret-addr
+	pop	de				; param #3: h
+	ld	h, e
+	pop	de				; param #2: c
+	ld	c, e
+	pop	de				; param #1: b
+	ld	b, e
+	push	ix
+	inc	b
+	dec	c
+	ld	a, h
+	and	a
+	jr	z, .next1
+	ld	h, $ff
+.next1
+	ld	a, l				; param #4: l
+	and	a
+	jr	z, .next2
+	ld	l, $ff
+.next2
+	push	bc
+	ld	bc, $094b			; TODO: ??
+	push	bc
+	push	hl
+	jp	BASIC_CONSOLE
+
+RT_COLOR:
+	ld	a, l				; param #3: a
+	pop	bc				; ret-addr
+	pop	hl				; param #2: l
+	pop	de				; param #1: e
+	ld	h, e
+	ld	d, a
+	ld	a, h
+	ld	(BASIC_FN_PARMS + 2), a
+	ld	a, d
+	push	bc
+	push	hl
+	jp	BASIC_COLOR
+
+RT_WIDTH:
+	pop	bc				; ret-addr
+	pop	de				; psrsm #1: e
+	ld	h, e
+	push	bc
+	push	hl
+	jp	BASIC_WIDTH
+
+RT_PSET:
+	ld	a, l
+	ld	(BASIC_FN_PARMS + 2), a		; param #3
+	ld	hl, $b02f			; indicate PSET
+	jr	RT_PSET_RESET
+
+RT_PRESET:
+	ex	(sp), hl			; param #2
+	push	hl				; ret-addr
+	ld	hl, $2fb0			; indicate PRESET
+
+RT_PSET_RESET:
+	ld	(BASIC_PSET_PARMS), hl
+	pop	bc				; ret-addr
+	pop	hl				; param #2
+	pop	de				; param #1
+	push	bc
+	ld	h, e
+	inc	h
+	inc	l
+	ld	(BASIC_FN_PARMS), hl
+	call	BASIC_PST_RST_1
+	jp	BASIC_PST_RST_2
+
+RT_LINE:
+	ld	a, l				; param #5
+	pop	ix				; ret-addr
+	pop	de				; param #4
+	pop	hl				; param #3
+	ld	d, l
+	pop	bc				; param #2
+	pop	hl				; [aram #1
+	ld	b, l
+	push	ix				; ret-addr
+	inc	b
+	inc	c
+	inc	d
+	inc	e
+	ld	hl, $08c7			; TDOO: ??
+	and	a
+	jp	nz, BASIC_LINE_PSET
+	jp	BASIC_LINE_PRESET
+
+;
+; === runtime vars
+;
+
+RT_SPPUSH:
+	dw	0
+RT_DONEST:
+	db	0
+RT_RND_SEED:
+	dw	0
+
+	end	$b400
+
