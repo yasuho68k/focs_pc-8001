@@ -50,7 +50,7 @@ INIT:
 
 	call	RT_PRINT
 	db	$0a,$e9,$e9,$e9			; $e9==heart
-	db	" FOCS Ver 1.0 "
+	db	" FOCS Ver 1.0.1 "
 	db	$e9,$e9,$e9,$0d,$0a,$0a,0
 
 	;	main loop
