@@ -626,7 +626,7 @@ PAR:
 	jr	nz, .term
 	inc	ix
 	call	EXPRSN
-	call	CCLOSE
+	jp	CCLOSE
 .term
 	cp	'-'
 	jr	nz, .inv
